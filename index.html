@@ -9,9 +9,9 @@
   <script src="https://cdn.tailwindcss.com"></script>
   
   <!-- Local Offline Scripts -->
-  <script src="/xlsx.full.min.js"></script>
-  <script src="/chart.min.js"></script>
-  <script src="/lucide.min.js"></script>
+  <script src="./xlsx.full.min.js"></script>
+  <script src="./chart.min.js"></script>
+  <script src="./lucide.min.js"></script>
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -38,7 +38,7 @@
       <!-- Logo + Title strictly as requested -->
       <div class="flex items-center gap-3.5">
         <div class="bg-white px-2.5 py-1 rounded-lg shadow-sm flex items-center justify-center">
-          <img src="/logo.png" alt="Skillversity Logo" class="h-8 sm:h-9 w-auto object-contain">
+          <img src="./logo.png" alt="Skillversity Logo" class="h-8 sm:h-9 w-auto object-contain">
         </div>
         <h1 class="text-lg sm:text-2xl font-bold tracking-tight text-white">
           Student Attendance Intelligence Dashboard
@@ -249,6 +249,35 @@
       </div>
     </section>
 
+    <!-- Analytics Charts Section -->
+    <section id="chartsSection" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <!-- 1. Overall Status Donut Chart -->
+      <div class="bg-white rounded-xl shadow-xs border border-slate-200 p-5 flex flex-col">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
+          <h3 class="text-sm font-bold text-slate-800 flex items-center gap-2">
+            <i data-lucide="pie-chart" class="w-4 h-4 text-emerald-600"></i> Overall Attendance Distribution
+          </h3>
+          <span class="text-xs text-slate-400">Present vs. Absent</span>
+        </div>
+        <div class="relative flex-1 flex items-center justify-center min-h-[240px] max-h-[280px]">
+          <canvas id="statusChart"></canvas>
+        </div>
+      </div>
+
+      <!-- 2. Batch-wise Comparison Bar Chart -->
+      <div class="bg-white rounded-xl shadow-xs border border-slate-200 p-5 flex flex-col">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
+          <h3 class="text-sm font-bold text-slate-800 flex items-center gap-2">
+            <i data-lucide="bar-chart-3" class="w-4 h-4 text-blue-600"></i> Batch-Wise Attendance Rates (%)
+          </h3>
+          <span class="text-xs text-slate-400">Comparison</span>
+        </div>
+        <div class="relative flex-1 flex items-center justify-center min-h-[240px] max-h-[280px]">
+          <canvas id="batchChart"></canvas>
+        </div>
+      </div>
+    </section>
+
     <!-- Faculty Breakdown Section (if faculty detected) -->
     <section id="facultySection" class="hidden bg-white rounded-xl shadow-xs border border-slate-200 p-5">
       <h3 class="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
@@ -311,7 +340,7 @@
     Student Attendance Intelligence Dashboard &bull; Live Institutional Reporting System
   </footer>
 
-  <script src="/app.js"></script>
+  <script src="./app.js"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();

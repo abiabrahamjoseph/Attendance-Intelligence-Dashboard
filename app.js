@@ -3,6 +3,8 @@ let uploadedRows = []; // Array of row objects from the uploaded Excel
 let tableColumns = []; // Array of column header names
 let currentFileName = null;
 let detectedCols = { student: null, status: null, batch: null, faculty: null, date: null };
+let statusChartInstance = null;
+let batchChartInstance = null;
 
 // Course code mapping
 const COURSE_MAPPING = {
@@ -301,10 +303,13 @@ function applyFilters() {
   // 2. Render Main Data Table
   renderTable(filtered);
 
-  // 3. Render Faculty Breakdown Table (if faculty detected)
+  // 3. Render Visual Analytics Charts
+  renderCharts(filtered);
+
+  // 4. Render Faculty Breakdown Table (if faculty detected)
   renderFacultyTable(filtered);
 
-  // 4. Update row count badge
+  // 5. Update row count badge
   const rowCountBadge = document.getElementById('rowCountBadge');
   const tableRecordCount = document.getElementById('tableRecordCount');
   if (rowCountBadge) rowCountBadge.textContent = `Showing ${filtered.length.toLocaleString()} of ${uploadedRows.length.toLocaleString()} rows`;
@@ -377,6 +382,118 @@ function updateKPIs(filtered) {
       tierBadge.textContent = 'Shortage (<75%)';
       tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-300';
       progressBar.className = 'h-full bg-rose-600';
+    }
+  }
+}
+
+function renderCharts(filtered) {
+  const section = document.getElementById('chartsSection');
+  if (!window.Chart || !section) return;
+
+  if (filtered.length === 0 || !detectedCols.status) {
+    section.classList.add('hidden');
+    return;
+  }
+
+  section.classList.remove('hidden');
+
+  // 1. Overall Status Donut Chart
+  let present = 0;
+  let absent = 0;
+  let other = 0;
+
+  filtered.forEach(r => {
+    const s = String(r[detectedCols.status] || '').toLowerCase();
+    if (s === 'present' || s === 'p' || s === '1' || s.includes('present')) present++;
+    else if (s === 'absent' || s === 'a' || s === '0' || s.includes('absent')) absent++;
+    else other++;
+  });
+
+  const ctxStatus = document.getElementById('statusChart')?.getContext('2d');
+  if (ctxStatus) {
+    if (statusChartInstance) statusChartInstance.destroy();
+    statusChartInstance = new Chart(ctxStatus, {
+      type: 'doughnut',
+      data: {
+        labels: ['Present', 'Absent', ...(other > 0 ? ['Other / Late'] : [])],
+        datasets: [{
+          data: [present, absent, ...(other > 0 ? [other] : [])],
+          backgroundColor: ['#10b981', '#f43f5e', '#f59e0b'],
+          borderWidth: 2,
+          borderColor: '#ffffff'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: { boxWidth: 12, font: { size: 11 } }
+          }
+        }
+      }
+    });
+  }
+
+  // 2. Batch Comparison Bar Chart
+  const ctxBatch = document.getElementById('batchChart')?.getContext('2d');
+  if (ctxBatch) {
+    if (batchChartInstance) batchChartInstance.destroy();
+
+    if (detectedCols.batch) {
+      const batchStats = {};
+      filtered.forEach(r => {
+        const b = String(r[detectedCols.batch] || 'Unassigned').trim();
+        if (!b) return;
+        if (!batchStats[b]) batchStats[b] = { present: 0, total: 0 };
+        const s = String(r[detectedCols.status] || '').toLowerCase();
+        if (s === 'present' || s === 'p' || s === '1' || s.includes('present')) {
+          batchStats[b].present++;
+          batchStats[b].total++;
+        } else if (s === 'absent' || s === 'a' || s === '0' || s.includes('absent')) {
+          batchStats[b].total++;
+        }
+      });
+
+      const labels = Object.keys(batchStats).slice(0, 10); // Show up to top 10 batches
+      const data = labels.map(l => {
+        const item = batchStats[l];
+        return item.total > 0 ? Math.round((item.present / item.total) * 100) : 0;
+      });
+
+      batchChartInstance = new Chart(ctxBatch, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Attendance Rate',
+            data: data,
+            backgroundColor: '#3b82f6',
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            y: {
+              beginAtZero: true,
+              max: 100,
+              ticks: {
+                callback: function(v) { return v + '%'; },
+                font: { size: 10 }
+              }
+            },
+            x: {
+              ticks: { font: { size: 10 } }
+            }
+          },
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
     }
   }
 }
@@ -541,6 +658,9 @@ function clearData() {
   detectedCols = { student: null, status: null, batch: null, faculty: null, date: null };
 
   document.getElementById('sheetSwitcher')?.classList.add('hidden');
+  if (statusChartInstance) { statusChartInstance.destroy(); statusChartInstance = null; }
+  if (batchChartInstance) { batchChartInstance.destroy(); batchChartInstance = null; }
+  document.getElementById('chartsSection')?.classList.add('hidden');
   updateStatusBar();
   populateFilters();
   applyFilters();
