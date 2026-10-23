@@ -2,6 +2,7 @@
 let uploadedRows = []; // Array of row objects from the uploaded Excel
 let tableColumns = []; // Array of column header names
 let currentFileName = null;
+let currentWorkbook = null; // Store loaded workbook for sheet switcher
 let detectedCols = { student: null, status: null, batch: null, faculty: null, date: null };
 let statusChartInstance = null;
 let batchChartInstance = null;
@@ -19,6 +20,131 @@ function getCourseName(batch) {
   const clean = String(batch).trim().toUpperCase();
   const p2 = clean.substring(0, 2);
   return COURSE_MAPPING[p2] || `${p2} Course`;
+}
+
+// Global trigger to open file dialog reliably
+function triggerFileInput() {
+  const fi = document.getElementById('excelFileInput');
+  if (fi) {
+    fi.value = null;
+    fi.click();
+  }
+}
+
+// Native input change handler
+function handleFileInputChange(input) {
+  if (input && input.files && input.files[0]) {
+    handleFileUpload(input.files[0]);
+  }
+}
+
+// Intelligent Header Row Detection
+function findBestHeaderRow(aoa) {
+  let bestIdx = 0;
+  let maxScore = -1;
+
+  for (let i = 0; i < Math.min(25, aoa.length); i++) {
+    const row = aoa[i];
+    if (!row || !Array.isArray(row)) continue;
+    const cells = row.map(c => String(c !== undefined && c !== null ? c : '').toLowerCase().trim());
+    let score = 0;
+
+    cells.forEach(c => {
+      if (!c) return;
+      if (c === 'student name' || c === 'candidate name' || c === 'student' || c === 'candidate') score += 15;
+      else if (c.includes('student') || c.includes('candidate')) score += 10;
+      else if (c === 'name' && !c.includes('holiday') && !c.includes('course') && !c.includes('day')) score += 8;
+
+      if (c === 'status' || c === 'attendance status' || c === 'p/a' || c === 'present/absent') score += 15;
+      else if (c === 'attendance') score += 10;
+
+      if (c === 'batch' || c === 'batch code' || c === 'class' || c === 'section') score += 10;
+      else if (c.includes('batch') || c.includes('class')) score += 8;
+
+      if (c === 'date' || c === 'attendance date' || c === 'day' || c === 'month') score += 8;
+      else if (c.includes('date')) score += 6;
+
+      if (c === 'taken by' || c === 'recorded by' || c === 'faculty' || c === 'faculty name' || c === 'teacher') score += 8;
+      else if (c.includes('faculty') || c.includes('taken by') || c.includes('teacher')) score += 6;
+
+      if (c === 'sl no' || c === 'sl.no' || c === 's.no' || c === 'id' || c === 'roll no') score += 6;
+    });
+
+    const filledCount = cells.filter(Boolean).length;
+    if (filledCount >= 3) score += filledCount * 2;
+
+    if (score > maxScore) {
+      maxScore = score;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+// Intelligent Sheet Selection for Multi-sheet Workbooks
+function findBestSheet(workbook) {
+  let bestSheetName = workbook.SheetNames[0];
+  let bestRows = [];
+  let bestScore = -999999;
+
+  for (let s = 0; s < workbook.SheetNames.length; s++) {
+    const sName = workbook.SheetNames[s];
+    const sheet = workbook.Sheets[sName];
+    if (!sheet) continue;
+
+    const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    if (!aoa || aoa.length === 0) continue;
+
+    const headerIdx = findBestHeaderRow(aoa);
+    const rawJson = XLSX.utils.sheet_to_json(sheet, { range: headerIdx, defval: '' });
+
+    // Filter out completely blank rows
+    const validRows = rawJson.filter(r => {
+      return Object.values(r).some(v => String(v !== undefined && v !== null ? v : '').trim().length > 0);
+    });
+
+    if (validRows.length === 0) continue;
+
+    const headers = Object.keys(validRows[0] || {}).map(h => h.toLowerCase().trim());
+    let score = validRows.length; // 1 point per row
+
+    // Bonus points for key attendance columns
+    const hasStudent = headers.some(h => h.includes('student') || (h.includes('name') && !h.includes('holiday') && !h.includes('course')));
+    const hasStatus = headers.some(h => h === 'status' || h.includes('attendance') || h === 'p/a');
+    const hasBatch = headers.some(h => h.includes('batch') || h.includes('class'));
+    const hasFaculty = headers.some(h => h.includes('taken by') || h.includes('faculty') || h.includes('teacher'));
+    const hasDate = headers.some(h => h.includes('date'));
+
+    if (hasStudent) score += 600;
+    if (hasStatus) score += 600;
+    if (hasBatch) score += 400;
+    if (hasFaculty) score += 300;
+    if (hasDate) score += 300;
+
+    // Sheet Name heuristics
+    const sLower = sName.toLowerCase();
+    if (sLower.includes('attendance') || sLower.includes('log') || sLower.includes('daily')) score += 1500;
+    if (sLower.includes('roster') || sLower.includes('data')) score += 600;
+    if (sLower.includes('dashboard') || sLower.includes('summary')) score -= 200;
+    if (sLower.includes('instruction') || sLower.includes('mapping') || sLower.includes('list') || sLower.includes('read me')) score -= 5000;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestSheetName = sName;
+      bestRows = validRows;
+    }
+  }
+
+  // Fallback if scoring found nothing
+  if (bestRows.length === 0 && workbook.SheetNames.length > 0) {
+    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+    const headerIdx = findBestHeaderRow(aoa);
+    bestRows = XLSX.utils.sheet_to_json(firstSheet, { range: headerIdx, defval: '' });
+    bestSheetName = workbook.SheetNames[0];
+  }
+
+  return { bestSheetName, bestRows };
 }
 
 // Master File Upload Handler
@@ -41,31 +167,10 @@ function handleFileUpload(file) {
         return;
       }
 
-      // Check all sheets and pick the sheet with the most records
-      let bestSheetName = workbook.SheetNames[0];
-      let bestRows = [];
+      currentWorkbook = workbook;
 
-      for (let s = 0; s < workbook.SheetNames.length; s++) {
-        const sName = workbook.SheetNames[s];
-        const sheet = workbook.Sheets[sName];
-        if (!sheet) continue;
-
-        // Auto-detect header row
-        const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-        let headerRowIdx = 0;
-        for (let i = 0; i < Math.min(20, aoa.length); i++) {
-          if (aoa[i] && aoa[i].filter(Boolean).length >= 2) {
-            headerRowIdx = i;
-            break;
-          }
-        }
-
-        const json = XLSX.utils.sheet_to_json(sheet, { range: headerRowIdx, defval: '' });
-        if (json && json.length > bestRows.length) {
-          bestRows = json;
-          bestSheetName = sName;
-        }
-      }
+      // Smart sheet detection
+      const { bestSheetName, bestRows } = findBestSheet(workbook);
 
       if (bestRows.length === 0) {
         alert(`Could not extract any data rows from "${file.name}". Please ensure the file has a header row and data rows.`);
@@ -88,7 +193,7 @@ function handleFileUpload(file) {
         sheetSwitcher.classList.add('flex');
 
         sheetSelect.onchange = function() {
-          loadSpecificSheet(workbook, sheetSelect.value);
+          loadSpecificSheet(currentWorkbook, sheetSelect.value);
         };
       } else if (sheetSwitcher) {
         sheetSwitcher.classList.add('hidden');
@@ -108,26 +213,39 @@ function handleFileUpload(file) {
 }
 
 function loadSpecificSheet(workbook, sheetName) {
+  if (!workbook) workbook = currentWorkbook;
+  if (!workbook) return;
   const sheet = workbook.Sheets[sheetName];
   if (!sheet) return;
   const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-  let headerRowIdx = 0;
-  for (let i = 0; i < Math.min(20, aoa.length); i++) {
-    if (aoa[i] && aoa[i].filter(Boolean).length >= 2) {
-      headerRowIdx = i;
-      break;
-    }
-  }
+  const headerRowIdx = findBestHeaderRow(aoa);
   const json = XLSX.utils.sheet_to_json(sheet, { range: headerRowIdx, defval: '' });
-  loadDataset(json, currentFileName);
+  const validRows = json.filter(r => {
+    return Object.values(r).some(v => String(v !== undefined && v !== null ? v : '').trim().length > 0);
+  });
+  loadDataset(validRows, currentFileName);
+}
+
+function resetFilterInputs() {
+  if (document.getElementById('studentFilter')) document.getElementById('studentFilter').value = 'ALL';
+  if (document.getElementById('batchFilter')) document.getElementById('batchFilter').value = 'ALL';
+  if (document.getElementById('statusFilter')) document.getElementById('statusFilter').value = 'ALL';
+  if (document.getElementById('facultyFilter')) document.getElementById('facultyFilter').value = 'ALL';
+  const searchInput = document.getElementById('searchInput');
+  if (searchInput) searchInput.value = '';
+  const clearBtn = document.getElementById('clearSearchBtn');
+  if (clearBtn) clearBtn.classList.add('hidden');
 }
 
 function loadDataset(rows, fileName) {
-  uploadedRows = rows;
+  uploadedRows = rows || [];
   currentFileName = fileName || 'Uploaded Spreadsheet';
 
   // Determine Columns from keys of the first row
-  tableColumns = Object.keys(rows[0] || {});
+  tableColumns = uploadedRows.length > 0 ? Object.keys(uploadedRows[0]) : [];
+
+  // Reset filters to ALL so data is never hidden by old filter state
+  resetFilterInputs();
 
   // Detect Column Semantics
   detectColumns();
@@ -145,30 +263,87 @@ function loadDataset(rows, fileName) {
 function detectColumns() {
   detectedCols = { student: null, status: null, batch: null, faculty: null, date: null };
 
+  // Pass 1: Look for exact / high-confidence matches
   tableColumns.forEach(col => {
-    const cLower = col.toLowerCase();
-    if (!detectedCols.student && (cLower.includes('student') || cLower.includes('name') || cLower.includes('candidate'))) {
-      detectedCols.student = col;
+    const cLower = col.toLowerCase().trim();
+
+    if (!detectedCols.student) {
+      if (cLower === 'student name' || cLower === 'candidate name' || cLower === 'student' || cLower === 'candidate') {
+        detectedCols.student = col;
+      }
     }
-    if (!detectedCols.status && (cLower === 'status' || cLower.includes('attendance') || cLower.includes('present') || cLower.includes('p/a'))) {
-      detectedCols.status = col;
+
+    if (!detectedCols.status) {
+      if (cLower === 'status' || cLower === 'attendance status' || cLower === 'p/a' || cLower === 'present/absent') {
+        detectedCols.status = col;
+      }
     }
-    if (!detectedCols.batch && (cLower.includes('batch') || cLower.includes('class') || cLower.includes('section'))) {
-      detectedCols.batch = col;
+
+    if (!detectedCols.batch) {
+      if (cLower === 'batch' || cLower === 'batch code' || cLower === 'class' || cLower === 'section') {
+        detectedCols.batch = col;
+      }
     }
-    if (!detectedCols.faculty && (cLower.includes('taken by') || cLower.includes('recorded by') || cLower.includes('faculty') || cLower.includes('teacher'))) {
-      detectedCols.faculty = col;
+
+    if (!detectedCols.faculty) {
+      if (cLower === 'taken by' || cLower === 'recorded by' || cLower === 'faculty' || cLower === 'faculty name' || cLower === 'teacher') {
+        detectedCols.faculty = col;
+      }
     }
-    if (!detectedCols.date && (cLower.includes('date') || cLower === 'day')) {
-      detectedCols.date = col;
+
+    if (!detectedCols.date) {
+      if (cLower === 'date' || cLower === 'attendance date' || cLower === 'day') {
+        detectedCols.date = col;
+      }
     }
   });
 
-  // Secondary scan by inspecting row values if headers were ambiguous
+  // Pass 2: Loose keyword matching for any unresolved columns
+  tableColumns.forEach(col => {
+    const cLower = col.toLowerCase().trim();
+
+    if (!detectedCols.student) {
+      if ((cLower.includes('student') || cLower.includes('name')) && !cLower.includes('course') && !cLower.includes('faculty') && !cLower.includes('holiday')) {
+        detectedCols.student = col;
+      }
+    }
+
+    if (!detectedCols.status) {
+      if (cLower.includes('attendance') && !cLower.includes('taken') && !cLower.includes('by') && !cLower.includes('count')) {
+        detectedCols.status = col;
+      }
+    }
+
+    if (!detectedCols.batch) {
+      if (cLower.includes('batch') || cLower.includes('class') || cLower.includes('section')) {
+        detectedCols.batch = col;
+      }
+    }
+
+    if (!detectedCols.faculty) {
+      if (cLower.includes('faculty') || cLower.includes('teacher') || cLower.includes('taken by') || cLower.includes('mentor')) {
+        detectedCols.faculty = col;
+      }
+    }
+
+    if (!detectedCols.date) {
+      if (cLower.includes('date') && !cLower.includes('birth')) {
+        detectedCols.date = col;
+      }
+    }
+  });
+
+  // Pass 3: Inspect row values if status is still not detected
   if (!detectedCols.status && uploadedRows.length > 0) {
     for (let c of tableColumns) {
-      const val = String(uploadedRows[0][c] || '').toLowerCase();
-      if (val === 'present' || val === 'absent' || val === 'p' || val === 'a') {
+      let matchCount = 0;
+      for (let i = 0; i < Math.min(25, uploadedRows.length); i++) {
+        const val = String(uploadedRows[i][c] || '').toLowerCase().trim();
+        if (val === 'present' || val === 'absent' || val === 'p' || val === 'a' || val === 'late' || val.includes('holiday') || val.includes('not marked')) {
+          matchCount++;
+        }
+      }
+      if (matchCount >= 2) {
         detectedCols.status = c;
         break;
       }
@@ -279,11 +454,11 @@ function getFilteredRows() {
     }
     // Status Filter
     if (selStatus !== 'ALL' && detectedCols.status) {
-      const val = String(r[detectedCols.status] || '').toLowerCase();
-      if (selStatus === 'Present' && !val.includes('present') && val !== 'p' && val !== '1') return false;
-      if (selStatus === 'Absent' && !val.includes('absent') && val !== 'a' && val !== '0') return false;
+      const val = String(r[detectedCols.status] || '').toLowerCase().trim();
+      if (selStatus === 'Present' && !val.includes('present') && val !== 'p' && val !== '1' && val !== 'attended') return false;
+      if (selStatus === 'Absent' && !val.includes('absent') && val !== 'a' && val !== '0' && val !== 'missed') return false;
       if (selStatus === 'Late' && !val.includes('late')) return false;
-      if (selStatus === 'Holiday' && !val.includes('holiday')) return false;
+      if (selStatus === 'Holiday' && !val.includes('holiday') && !val.includes('leave')) return false;
     }
     // Search Box across all columns
     if (search) {
@@ -332,10 +507,10 @@ function updateKPIs(filtered) {
       batches.add(String(r[detectedCols.batch]).trim());
     }
     if (detectedCols.status) {
-      const s = String(r[detectedCols.status] || '').toLowerCase();
-      if (s === 'present' || s === 'p' || s === '1' || s.includes('present')) {
+      const s = String(r[detectedCols.status] || '').toLowerCase().trim();
+      if (s === 'present' || s === 'p' || s === '1' || s === 'attended' || s.includes('present')) {
         present++;
-      } else if (s === 'absent' || s === 'a' || s === '0' || s.includes('absent')) {
+      } else if (s === 'absent' || s === 'a' || s === '0' || s === 'missed' || s.includes('absent')) {
         absent++;
       }
     }
@@ -344,44 +519,52 @@ function updateKPIs(filtered) {
   const totalMarked = present + absent;
   const pct = totalMarked > 0 ? ((present / totalMarked) * 100).toFixed(1) : '—';
 
-  document.getElementById('kpiTotalRows').textContent = filtered.length.toLocaleString();
-  document.getElementById('kpiPresent').textContent = present.toLocaleString();
-  document.getElementById('kpiAbsent').textContent = absent.toLocaleString();
-  document.getElementById('kpiStudents').textContent = students.size.toLocaleString();
-  document.getElementById('kpiBatches').textContent = batches.size.toLocaleString();
+  const kpiTotalEl = document.getElementById('kpiTotalRows');
+  const kpiPresentEl = document.getElementById('kpiPresent');
+  const kpiAbsentEl = document.getElementById('kpiAbsent');
+  const kpiStudentsEl = document.getElementById('kpiStudents');
+  const kpiBatchesEl = document.getElementById('kpiBatches');
+
+  if (kpiTotalEl) kpiTotalEl.textContent = filtered.length.toLocaleString();
+  if (kpiPresentEl) kpiPresentEl.textContent = present.toLocaleString();
+  if (kpiAbsentEl) kpiAbsentEl.textContent = absent.toLocaleString();
+  if (kpiStudentsEl) kpiStudentsEl.textContent = students.size.toLocaleString();
+  if (kpiBatchesEl) kpiBatchesEl.textContent = batches.size.toLocaleString();
 
   // Percentage & Tier Badge
   const pctEl = document.getElementById('kpiPercentage');
   const tierBadge = document.getElementById('kpiTierBadge');
   const progressBar = document.getElementById('kpiProgressBar');
 
-  if (pct === '—') {
-    pctEl.textContent = '—';
-    pctEl.className = 'text-2xl font-black text-slate-400';
-    tierBadge.textContent = 'No Data';
-    tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600';
-    progressBar.style.width = '0%';
-    progressBar.className = 'h-full bg-slate-300';
-  } else {
-    const numPct = parseFloat(pct);
-    pctEl.textContent = `${pct}%`;
-    progressBar.style.width = `${Math.min(100, Math.max(0, numPct))}%`;
-
-    if (numPct >= 90) {
-      pctEl.className = 'text-2xl font-black text-emerald-700';
-      tierBadge.textContent = 'Good (>=90%)';
-      tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300';
-      progressBar.className = 'h-full bg-emerald-600';
-    } else if (numPct >= 75) {
-      pctEl.className = 'text-2xl font-black text-amber-700';
-      tierBadge.textContent = 'Warning (75-89%)';
-      tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300';
-      progressBar.className = 'h-full bg-amber-500';
+  if (pctEl && tierBadge && progressBar) {
+    if (pct === '—') {
+      pctEl.textContent = '—';
+      pctEl.className = 'text-2xl font-black text-slate-400';
+      tierBadge.textContent = 'No Data';
+      tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600';
+      progressBar.style.width = '0%';
+      progressBar.className = 'h-full bg-slate-300';
     } else {
-      pctEl.className = 'text-2xl font-black text-rose-700';
-      tierBadge.textContent = 'Shortage (<75%)';
-      tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-300';
-      progressBar.className = 'h-full bg-rose-600';
+      const numPct = parseFloat(pct);
+      pctEl.textContent = `${pct}%`;
+      progressBar.style.width = `${Math.min(100, Math.max(0, numPct))}%`;
+
+      if (numPct >= 90) {
+        pctEl.className = 'text-2xl font-black text-emerald-700';
+        tierBadge.textContent = 'Good (>=90%)';
+        tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300';
+        progressBar.className = 'h-full bg-emerald-600';
+      } else if (numPct >= 75) {
+        pctEl.className = 'text-2xl font-black text-amber-700';
+        tierBadge.textContent = 'Warning (75-89%)';
+        tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300';
+        progressBar.className = 'h-full bg-amber-500';
+      } else {
+        pctEl.className = 'text-2xl font-black text-rose-700';
+        tierBadge.textContent = 'Shortage (<75%)';
+        tierBadge.className = 'text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-300';
+        progressBar.className = 'h-full bg-rose-600';
+      }
     }
   }
 }
@@ -403,9 +586,9 @@ function renderCharts(filtered) {
   let other = 0;
 
   filtered.forEach(r => {
-    const s = String(r[detectedCols.status] || '').toLowerCase();
-    if (s === 'present' || s === 'p' || s === '1' || s.includes('present')) present++;
-    else if (s === 'absent' || s === 'a' || s === '0' || s.includes('absent')) absent++;
+    const s = String(r[detectedCols.status] || '').toLowerCase().trim();
+    if (s === 'present' || s === 'p' || s === '1' || s === 'attended' || s.includes('present')) present++;
+    else if (s === 'absent' || s === 'a' || s === '0' || s === 'missed' || s.includes('absent')) absent++;
     else other++;
   });
 
@@ -415,7 +598,7 @@ function renderCharts(filtered) {
     statusChartInstance = new Chart(ctxStatus, {
       type: 'doughnut',
       data: {
-        labels: ['Present', 'Absent', ...(other > 0 ? ['Other / Late'] : [])],
+        labels: ['Present', 'Absent', ...(other > 0 ? ['Other / Excused'] : [])],
         datasets: [{
           data: [present, absent, ...(other > 0 ? [other] : [])],
           backgroundColor: ['#10b981', '#f43f5e', '#f59e0b'],
@@ -447,16 +630,16 @@ function renderCharts(filtered) {
         const b = String(r[detectedCols.batch] || 'Unassigned').trim();
         if (!b) return;
         if (!batchStats[b]) batchStats[b] = { present: 0, total: 0 };
-        const s = String(r[detectedCols.status] || '').toLowerCase();
-        if (s === 'present' || s === 'p' || s === '1' || s.includes('present')) {
+        const s = String(r[detectedCols.status] || '').toLowerCase().trim();
+        if (s === 'present' || s === 'p' || s === '1' || s === 'attended' || s.includes('present')) {
           batchStats[b].present++;
           batchStats[b].total++;
-        } else if (s === 'absent' || s === 'a' || s === '0' || s.includes('absent')) {
+        } else if (s === 'absent' || s === 'a' || s === '0' || s === 'missed' || s.includes('absent')) {
           batchStats[b].total++;
         }
       });
 
-      const labels = Object.keys(batchStats).slice(0, 10); // Show up to top 10 batches
+      const labels = Object.keys(batchStats).slice(0, 10);
       const data = labels.map(l => {
         const item = batchStats[l];
         return item.total > 0 ? Math.round((item.present / item.total) * 100) : 0;
@@ -502,6 +685,8 @@ function renderTable(rows) {
   const thead = document.getElementById('dataTableHeader');
   const tbody = document.getElementById('dataTableBody');
 
+  if (!thead || !tbody) return;
+
   if (tableColumns.length === 0 || rows.length === 0) {
     thead.innerHTML = `<tr><th class="py-3 px-4 text-center text-slate-400">${uploadedRows.length === 0 ? 'Please upload an Excel file above to see data' : 'No records match your active filters'}</th></tr>`;
     tbody.innerHTML = `<tr><td class="py-12 text-center text-slate-400">${uploadedRows.length === 0 ? 'Upload an Excel spreadsheet above to display records.' : 'No rows match the selected filters. Click Reset to clear filters.'}</td></tr>`;
@@ -535,13 +720,13 @@ function renderTable(rows) {
       // Smart pill styling for Status column
       if (col === detectedCols.status) {
         const lower = strVal.toLowerCase();
-        if (lower === 'present' || lower === 'p' || lower === '1') {
+        if (lower === 'present' || lower === 'p' || lower === '1' || lower === 'attended') {
           formattedVal = `<span class="inline-block px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-800 font-bold">Present</span>`;
-        } else if (lower === 'absent' || lower === 'a' || lower === '0') {
+        } else if (lower === 'absent' || lower === 'a' || lower === '0' || lower === 'missed') {
           formattedVal = `<span class="inline-block px-2 py-0.5 rounded text-xs bg-rose-100 text-rose-800 font-bold">Absent</span>`;
         } else if (lower.includes('late')) {
           formattedVal = `<span class="inline-block px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800 font-bold">${strVal}</span>`;
-        } else if (lower.includes('holiday')) {
+        } else if (lower.includes('holiday') || lower.includes('leave')) {
           formattedVal = `<span class="inline-block px-2 py-0.5 rounded text-xs bg-purple-100 text-purple-800 font-bold">${strVal}</span>`;
         }
       }
@@ -559,18 +744,21 @@ function renderFacultyTable(rows) {
   const section = document.getElementById('facultySection');
   const tbody = document.getElementById('facultyTableBody');
 
+  if (!section || !tbody) return;
+
   if (!detectedCols.faculty || rows.length === 0) {
-    if (section) section.classList.add('hidden');
+    section.classList.add('hidden');
     return;
   }
 
-  section.classList.remove('hidden');
   const faculties = [...new Set(rows.map(r => String(r[detectedCols.faculty] || '').trim()).filter(Boolean))].sort();
 
   if (faculties.length === 0) {
     section.classList.add('hidden');
     return;
   }
+
+  section.classList.remove('hidden');
 
   let html = '';
   faculties.forEach((fac, idx) => {
@@ -582,9 +770,9 @@ function renderFacultyTable(rows) {
     facRows.forEach(r => {
       if (detectedCols.batch && r[detectedCols.batch]) batches.add(String(r[detectedCols.batch]).trim());
       if (detectedCols.status) {
-        const s = String(r[detectedCols.status] || '').toLowerCase();
-        if (s === 'present' || s === 'p' || s === '1' || s.includes('present')) present++;
-        else if (s === 'absent' || s === 'a' || s === '0' || s.includes('absent')) absent++;
+        const s = String(r[detectedCols.status] || '').toLowerCase().trim();
+        if (s === 'present' || s === 'p' || s === '1' || s === 'attended' || s.includes('present')) present++;
+        else if (s === 'absent' || s === 'a' || s === '0' || s === 'missed' || s.includes('absent')) absent++;
       }
     });
 
@@ -637,14 +825,7 @@ function clearSearch() {
 }
 
 function resetFilters() {
-  if (document.getElementById('studentFilter')) document.getElementById('studentFilter').value = 'ALL';
-  if (document.getElementById('batchFilter')) document.getElementById('batchFilter').value = 'ALL';
-  if (document.getElementById('statusFilter')) document.getElementById('statusFilter').value = 'ALL';
-  if (document.getElementById('facultyFilter')) document.getElementById('facultyFilter').value = 'ALL';
-  const searchInput = document.getElementById('searchInput');
-  if (searchInput) searchInput.value = '';
-  const clearBtn = document.getElementById('clearSearchBtn');
-  if (clearBtn) clearBtn.classList.add('hidden');
+  resetFilterInputs();
   applyFilters();
 }
 
@@ -655,6 +836,7 @@ function clearData() {
   uploadedRows = [];
   tableColumns = [];
   currentFileName = null;
+  currentWorkbook = null;
   detectedCols = { student: null, status: null, batch: null, faculty: null, date: null };
 
   document.getElementById('sheetSwitcher')?.classList.add('hidden');
@@ -684,28 +866,22 @@ function exportToExcel() {
   XLSX.writeFile(wb, `Export_${currentFileName || 'Attendance'}.xlsx`);
 }
 
-// Global Event Listeners Setup
-document.addEventListener('DOMContentLoaded', function() {
+// Resilient App Initialization
+function initApp() {
   const fileInput = document.getElementById('excelFileInput');
   const dropZone = document.getElementById('dropZone');
   const exportBtn = document.getElementById('exportExcelBtn');
 
-  // Input change
   if (fileInput) {
     fileInput.addEventListener('change', function(e) {
-      const file = e.target.files && e.target.files[0];
-      if (file) {
-        handleFileUpload(file);
-      }
-      fileInput.value = ''; // Reset so uploading same file again triggers change
+      handleFileInputChange(fileInput);
     });
   }
 
-  // Window drag/drop prevention
+  // Prevent browser window from opening dragged files
   window.addEventListener('dragover', function(e) { e.preventDefault(); }, false);
   window.addEventListener('drop', function(e) { e.preventDefault(); }, false);
 
-  // DropZone handlers
   if (dropZone) {
     ['dragenter', 'dragover'].forEach(name => {
       dropZone.addEventListener(name, function(e) {
@@ -724,6 +900,8 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     dropZone.addEventListener('drop', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
       const dt = e.dataTransfer;
       const file = dt && dt.files && dt.files[0];
       if (file) {
@@ -738,4 +916,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
   updateStatusBar();
   applyFilters();
-});
+}
+
+// Run immediately if DOM is ready, or on DOMContentLoaded
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}
