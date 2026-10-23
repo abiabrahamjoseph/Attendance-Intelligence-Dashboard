@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Student Attendance Intelligence Dashboard</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Local Offline Scripts -->
+  <script src="/xlsx.full.min.js"></script>
+  <script src="/chart.min.js"></script>
+  <script src="/lucide.min.js"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    @media print {
+      header, #uploadCard, #filtersBar, footer, .no-print { display: none !important; }
+      body { background-color: #ffffff !important; }
+      main { padding: 0 !important; max-width: 100% !important; }
+      .shadow-sm, .shadow-md { box-shadow: none !important; }
+    }
+  </style>
+</head>
+<body class="text-slate-800 antialiased min-h-screen flex flex-col">
+
+  <!-- Native Hidden File Input -->
+  <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" style="position: fixed; top: -1000px; left: -1000px; opacity: 0; pointer-events: none;">
+
+  <!-- Header Banner -->
+  <header class="bg-[#1b365d] text-white shadow-lg border-b border-blue-900 sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <!-- Logo + Title strictly as requested -->
+      <div class="flex items-center gap-3.5">
+        <div class="bg-white px-2.5 py-1 rounded-lg shadow-sm flex items-center justify-center">
+          <img src="/logo.png" alt="Skillversity Logo" class="h-8 sm:h-9 w-auto object-contain">
+        </div>
+        <h1 class="text-lg sm:text-2xl font-bold tracking-tight text-white">
+          Student Attendance Intelligence Dashboard
+        </h1>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="flex flex-wrap items-center gap-2">
+        <label for="excelFileInput" class="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-bold px-4 py-2 rounded-lg shadow-md transition cursor-pointer select-none">
+          <i data-lucide="upload-cloud" class="w-4 h-4"></i>
+          Upload Excel File
+        </label>
+        <button id="exportExcelBtn" class="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold px-3.5 py-2 rounded-lg shadow-sm transition cursor-pointer">
+          <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
+          Export Excel
+        </button>
+        <button id="printBtn" class="inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs sm:text-sm font-semibold px-3 py-2 rounded-lg shadow-sm transition cursor-pointer" onclick="window.print()">
+          <i data-lucide="printer" class="w-4 h-4"></i>
+          Print
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full space-y-6">
+
+    <!-- Hero Upload Dropzone Card -->
+    <section id="uploadCard" class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+      <label for="excelFileInput" id="dropZone" class="block border-2 border-dashed border-blue-300 hover:border-blue-600 bg-blue-50/40 hover:bg-blue-50/70 transition-all p-6 sm:p-8 cursor-pointer text-center select-none group">
+        <div class="flex flex-col items-center justify-center gap-2.5">
+          <div class="w-14 h-14 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center group-hover:scale-110 transition-transform shadow-xs">
+            <i data-lucide="upload-cloud" class="w-7 h-7"></i>
+          </div>
+          <div>
+            <p class="text-base sm:text-lg font-bold text-slate-800">
+              Drag & Drop your Attendance Excel file here or <span class="text-blue-600 underline">click to browse</span>
+            </p>
+            <p class="text-xs sm:text-sm text-slate-500 mt-1">
+              Upload any spreadsheet (.xlsx, .xls, .csv) to view your uploaded student attendance data instantly
+            </p>
+          </div>
+          <div class="mt-2 flex flex-wrap items-center justify-center gap-2">
+            <span class="inline-flex items-center gap-2 bg-blue-600 text-white font-bold text-xs sm:text-sm px-5 py-2.5 rounded-lg shadow-md group-hover:bg-blue-700 transition">
+              <i data-lucide="folder-plus" class="w-4 h-4"></i> Choose Excel File
+            </span>
+          </div>
+        </div>
+      </label>
+
+      <!-- Active File Status Bar -->
+      <div id="fileStatusBar" class="bg-slate-50 border-t border-slate-200 px-5 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div class="flex flex-wrap items-center gap-3">
+          <span id="fileBadge" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-800 font-bold border border-amber-200">
+            <i data-lucide="clock" class="w-3.5 h-3.5 text-amber-600"></i>
+            <span id="fileNameText">No file uploaded yet</span>
+          </span>
+          <span id="fileStatsText" class="text-slate-500 font-medium">Please upload an attendance Excel file above to see your data.</span>
+
+          <!-- Multi-Sheet Switcher -->
+          <div id="sheetSwitcher" class="hidden items-center gap-1.5 bg-white border border-slate-300 px-2.5 py-1 rounded-md text-slate-700">
+            <span class="font-semibold text-slate-600">Sheet:</span>
+            <select id="sheetSelect" class="bg-transparent font-medium focus:outline-none cursor-pointer text-xs"></select>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <label for="excelFileInput" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-xs transition cursor-pointer select-none">
+            <i data-lucide="upload" class="w-3.5 h-3.5"></i> Upload New File
+          </label>
+          <button id="clearBtn" class="text-xs text-rose-600 hover:text-rose-800 font-medium flex items-center gap-1 hover:underline ml-1" onclick="clearData()">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Clear
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- KPI Summary Cards -->
+    <section id="kpiSection">
+      <!-- Attendance Core Metrics -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5">
+        <!-- 1. Total Records -->
+        <div class="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
+          <div class="flex items-center justify-between text-slate-500 mb-1">
+            <span class="text-[11px] font-bold uppercase tracking-wider">Total Records</span>
+            <i data-lucide="database" class="w-4 h-4 text-blue-500"></i>
+          </div>
+          <p id="kpiTotalRows" class="text-2xl font-extrabold text-slate-800">0</p>
+          <span class="text-[10px] text-slate-400 mt-0.5 block">Uploaded sessions</span>
+        </div>
+
+        <!-- 2. Present -->
+        <div class="bg-emerald-50/80 border border-emerald-200 rounded-xl p-3.5 shadow-xs">
+          <div class="flex items-center justify-between text-emerald-700 mb-1">
+            <span class="text-[11px] font-bold uppercase tracking-wider">Total Present</span>
+            <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-600"></i>
+          </div>
+          <p id="kpiPresent" class="text-2xl font-extrabold text-emerald-800">0</p>
+          <span class="text-[10px] text-emerald-600 mt-0.5 block">Attended sessions</span>
+        </div>
+
+        <!-- 3. Absent -->
+        <div class="bg-rose-50/80 border border-rose-200 rounded-xl p-3.5 shadow-xs">
+          <div class="flex items-center justify-between text-rose-700 mb-1">
+            <span class="text-[11px] font-bold uppercase tracking-wider">Total Absent</span>
+            <i data-lucide="x-circle" class="w-4 h-4 text-rose-600"></i>
+          </div>
+          <p id="kpiAbsent" class="text-2xl font-extrabold text-rose-800">0</p>
+          <span class="text-[10px] text-rose-600 mt-0.5 block">Missed sessions</span>
+        </div>
+
+        <!-- 4. Attendance % -->
+        <div id="kpiPctCard" class="bg-white border-2 border-slate-200 rounded-xl p-3.5 shadow-xs">
+          <div class="flex items-center justify-between text-slate-600 mb-1">
+            <span class="text-[11px] font-bold uppercase tracking-wider">Attendance %</span>
+            <span id="kpiTierBadge" class="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600">Tier</span>
+          </div>
+          <p id="kpiPercentage" class="text-2xl font-black text-slate-800">—</p>
+          <div class="w-full bg-slate-100 h-1.5 rounded-full mt-1.5 overflow-hidden">
+            <div id="kpiProgressBar" class="h-full bg-blue-600 transition-all duration-500" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <!-- 5. Students Count -->
+        <div class="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
+          <div class="flex items-center justify-between text-slate-500 mb-1">
+            <span class="text-[11px] font-bold uppercase tracking-wider">Students</span>
+            <i data-lucide="users" class="w-4 h-4 text-indigo-500"></i>
+          </div>
+          <p id="kpiStudents" class="text-2xl font-extrabold text-slate-800">0</p>
+          <span class="text-[10px] text-slate-400 mt-0.5 block">Unique students</span>
+        </div>
+
+        <!-- 6. Batches Count -->
+        <div class="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
+          <div class="flex items-center justify-between text-slate-500 mb-1">
+            <span class="text-[11px] font-bold uppercase tracking-wider">Batches</span>
+            <i data-lucide="layers" class="w-4 h-4 text-amber-500"></i>
+          </div>
+          <p id="kpiBatches" class="text-2xl font-extrabold text-slate-800">0</p>
+          <span class="text-[10px] text-slate-400 mt-0.5 block">Unique batches</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Filters Bar -->
+    <section id="filtersBar" class="bg-white rounded-xl shadow-xs border border-slate-200 p-4">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-3 border-b border-slate-100 mb-3">
+        <div class="flex items-center gap-2">
+          <i data-lucide="sliders-horizontal" class="w-4 h-4 text-blue-600"></i>
+          <h2 class="font-bold text-slate-800 text-sm">Interactive Attendance Filters & Search</h2>
+        </div>
+        <div class="flex items-center gap-3 text-xs">
+          <span id="rowCountBadge" class="px-2.5 py-1 bg-slate-100 font-semibold text-slate-700 rounded-md">Showing 0 rows</span>
+          <button id="resetFiltersBtn" class="text-blue-600 hover:text-blue-800 font-medium hover:underline flex items-center gap-1" onclick="resetFilters()">
+            <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> Reset
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <!-- 1. Student Filter -->
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 mb-1">Student Name</label>
+          <select id="studentFilter" class="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-2 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" onchange="applyFilters()">
+            <option value="ALL">All Students</option>
+          </select>
+        </div>
+
+        <!-- 2. Batch Filter -->
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 mb-1">Batch</label>
+          <select id="batchFilter" class="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-2 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" onchange="applyFilters()">
+            <option value="ALL">All Batches</option>
+          </select>
+        </div>
+
+        <!-- 3. Status Filter -->
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 mb-1">Status</label>
+          <select id="statusFilter" class="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-2 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" onchange="applyFilters()">
+            <option value="ALL">All Statuses</option>
+            <option value="Present">Present Only</option>
+            <option value="Absent">Absent Only</option>
+            <option value="Late">Late Only</option>
+            <option value="Holiday">Holidays</option>
+          </select>
+        </div>
+
+        <!-- 4. Faculty Filter -->
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 mb-1">Faculty / Taken By</label>
+          <select id="facultyFilter" class="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-2 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" onchange="applyFilters()">
+            <option value="ALL">All Faculty</option>
+          </select>
+        </div>
+
+        <!-- 5. Search Option -->
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 mb-1">Search Records</label>
+          <div class="relative">
+            <input type="text" id="searchInput" placeholder="Search rows..." class="w-full text-xs border border-slate-300 rounded-lg pl-8 pr-7 py-2 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition" oninput="handleSearchInput()">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5"></i>
+            <button id="clearSearchBtn" class="hidden absolute right-2 top-2 text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer" onclick="clearSearch()" title="Clear search">
+              <i data-lucide="x" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Faculty Breakdown Section (if faculty detected) -->
+    <section id="facultySection" class="hidden bg-white rounded-xl shadow-xs border border-slate-200 p-5">
+      <h3 class="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
+        <i data-lucide="users" class="w-4 h-4 text-indigo-600"></i> Faculty-Wise Attendance Summary
+      </h3>
+      <div class="overflow-x-auto custom-scrollbar">
+        <table class="w-full text-left border-collapse text-xs">
+          <thead>
+            <tr class="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200 uppercase text-[11px]">
+              <th class="py-2.5 px-3 w-10 text-center">#</th>
+              <th class="py-2.5 px-4">Faculty / Attendance Recorder</th>
+              <th class="py-2.5 px-3 text-center">Batches</th>
+              <th class="py-2.5 px-3 text-center">Total Sessions</th>
+              <th class="py-2.5 px-3 text-center text-emerald-700">Present</th>
+              <th class="py-2.5 px-3 text-center text-rose-700">Absent</th>
+              <th class="py-2.5 px-4 text-center">Attendance %</th>
+            </tr>
+          </thead>
+          <tbody id="facultyTableBody" class="divide-y divide-slate-100"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Uploaded Attendance Data Table -->
+    <section class="bg-white rounded-xl shadow-xs border border-slate-200 p-5">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-3 border-b border-slate-100 gap-2 mb-4">
+        <div>
+          <h3 class="text-base font-bold text-slate-800 flex items-center gap-2">
+            <i data-lucide="table" class="w-5 h-5 text-blue-600"></i> Uploaded Attendance Data
+          </h3>
+          <p class="text-xs text-slate-500">Live view of records from your uploaded spreadsheet</p>
+        </div>
+        <div id="tableRecordCount" class="text-xs text-slate-600 font-medium">0 records</div>
+      </div>
+
+      <div class="overflow-x-auto custom-scrollbar max-h-[600px] border border-slate-200 rounded-lg">
+        <table class="w-full text-left border-collapse text-xs">
+          <thead id="dataTableHeader" class="sticky top-0 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 shadow-xs z-10">
+            <tr>
+              <th class="py-3 px-4 text-center text-slate-400">Please upload an Excel file above to see data</th>
+            </tr>
+          </thead>
+          <tbody id="dataTableBody" class="divide-y divide-slate-100">
+            <tr>
+              <td class="py-12 text-center text-slate-400">
+                <div class="flex flex-col items-center justify-center gap-2">
+                  <i data-lucide="file-spreadsheet" class="w-8 h-8 text-slate-300"></i>
+                  <span>No data loaded yet. Drag & drop or upload your attendance Excel file above.</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500 mt-auto">
+    Student Attendance Intelligence Dashboard &bull; Live Institutional Reporting System
+  </footer>
+
+  <script src="/app.js"></script>
+  <script>
+    if (window.lucide) {
+      lucide.createIcons();
+    }
+  </script>
+</body>
+</html>
