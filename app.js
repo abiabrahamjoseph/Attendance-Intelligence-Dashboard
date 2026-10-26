@@ -1,11 +1,28 @@
 // Student Attendance Intelligence Dashboard - Robust Production Script
 let uploadedRows = []; // Array of row objects from the uploaded Excel
+let loadedFiles = [];  // Array of loaded file objects: { id, name, size, sheetName, workbook, rows, columns }
 let tableColumns = []; // Array of column header names
 let currentFileName = null;
 let currentWorkbook = null; // Store loaded workbook for sheet switcher
 let detectedCols = { student: null, status: null, batch: null, faculty: null, date: null };
 let statusChartInstance = null;
 let batchChartInstance = null;
+let isAppendMode = false;
+
+// Stored files in server storage
+let storageFilesList = [];
+let selectedStorageFiles = new Set();
+
+// HTML escape helper
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
 // Course code mapping
 const COURSE_MAPPING = {
@@ -23,7 +40,8 @@ function getCourseName(batch) {
 }
 
 // Global trigger to open file dialog reliably
-function triggerFileInput() {
+function triggerFileInput(append = false) {
+  isAppendMode = Boolean(append);
   const fi = document.getElementById('excelFileInput');
   if (fi) {
     fi.value = null;
@@ -31,10 +49,10 @@ function triggerFileInput() {
   }
 }
 
-// Native input change handler
+// Native input change handler (supports multiple files)
 function handleFileInputChange(input) {
-  if (input && input.files && input.files[0]) {
-    handleFileUpload(input.files[0]);
+  if (input && input.files && input.files.length > 0) {
+    handleMultipleFiles(Array.from(input.files), isAppendMode);
   }
 }
 
@@ -147,83 +165,300 @@ function findBestSheet(workbook) {
   return { bestSheetName, bestRows };
 }
 
-// Master File Upload Handler
-function handleFileUpload(file) {
-  if (!file) return;
-
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    try {
-      if (typeof XLSX === 'undefined') {
-        alert('Excel library (SheetJS) is loading. Please try again in 1 second.');
-        return;
-      }
-
-      const data = new Uint8Array(e.target.result);
-      const workbook = XLSX.read(data, { type: 'array', cellDates: true });
-
-      if (!workbook || !workbook.SheetNames || workbook.SheetNames.length === 0) {
-        alert('No readable sheets found in this Excel file.');
-        return;
-      }
-
-      currentWorkbook = workbook;
-
-      // Smart sheet detection
-      const { bestSheetName, bestRows } = findBestSheet(workbook);
-
-      if (bestRows.length === 0) {
-        alert(`Could not extract any data rows from "${file.name}". Please ensure the file has a header row and data rows.`);
-        return;
-      }
-
-      // Setup multi-sheet switcher if more than 1 sheet
-      const sheetSwitcher = document.getElementById('sheetSwitcher');
-      const sheetSelect = document.getElementById('sheetSelect');
-      if (workbook.SheetNames.length > 1 && sheetSwitcher && sheetSelect) {
-        sheetSelect.innerHTML = '';
-        workbook.SheetNames.forEach(name => {
-          const opt = document.createElement('option');
-          opt.value = name;
-          opt.textContent = name;
-          if (name === bestSheetName) opt.selected = true;
-          sheetSelect.appendChild(opt);
-        });
-        sheetSwitcher.classList.remove('hidden');
-        sheetSwitcher.classList.add('flex');
-
-        sheetSelect.onchange = function() {
-          loadSpecificSheet(currentWorkbook, sheetSelect.value);
-        };
-      } else if (sheetSwitcher) {
-        sheetSwitcher.classList.add('hidden');
-        sheetSwitcher.classList.remove('flex');
-      }
-
-      // Load the detected sheet
-      loadDataset(bestRows, file.name);
-
-    } catch (err) {
-      console.error('Error processing file:', err);
-      alert('Error reading Excel file: ' + err.message);
-    }
-  };
-
-  reader.readAsArrayBuffer(file);
+// Read File Helper returning ArrayBuffer
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = err => reject(err);
+    reader.readAsArrayBuffer(file);
+  });
 }
 
-function loadSpecificSheet(workbook, sheetName) {
-  if (!workbook) workbook = currentWorkbook;
-  if (!workbook) return;
-  const sheet = workbook.Sheets[sheetName];
+// Convert File / Blob to Base64 string
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      const base64 = result.includes(',') ? result.split(',')[1] : result;
+      resolve(base64);
+    };
+    reader.onerror = err => reject(err);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Parse ArrayBuffer into Workbook and best rows
+function parseWorkbookData(arrayBuffer, fileName) {
+  const data = new Uint8Array(arrayBuffer);
+  const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+
+  if (!workbook || !workbook.SheetNames || workbook.SheetNames.length === 0) {
+    throw new Error(`No readable sheets found in "${fileName}".`);
+  }
+
+  const { bestSheetName, bestRows } = findBestSheet(workbook);
+  if (!bestRows || bestRows.length === 0) {
+    throw new Error(`Could not extract any data rows from "${fileName}". Ensure it contains valid header and data rows.`);
+  }
+
+  const columns = bestRows.length > 0 ? Object.keys(bestRows[0]) : [];
+  return {
+    workbook,
+    sheetName: bestSheetName,
+    rows: bestRows,
+    columns
+  };
+}
+
+// Automatically save uploaded file to server storage (./uploads/)
+async function saveFileToStorage(file) {
+  try {
+    const base64 = await fileToBase64(file);
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name, contentBase64: base64 })
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      console.log('File successfully saved to server storage:', result);
+      updateStorageCountBadge();
+      const storageStatusText = document.getElementById('storageStatusText');
+      if (storageStatusText) {
+        storageStatusText.textContent = 'Saved to Storage';
+        setTimeout(() => {
+          if (storageStatusText) storageStatusText.textContent = 'Storage Ready';
+        }, 3000);
+      }
+    }
+  } catch (err) {
+    console.warn('Note: Server storage API unavailable (standalone offline mode?):', err.message);
+  }
+}
+
+// Master Handler for Uploading Multiple Spreadsheets at a Time
+async function handleMultipleFiles(files, append = false) {
+  if (!files || files.length === 0) return;
+
+  if (typeof XLSX === 'undefined') {
+    alert('Excel library (SheetJS) is still loading. Please try again in 1 second.');
+    return;
+  }
+
+  const validFiles = files.filter(f => {
+    const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase();
+    return ext === '.xlsx' || ext === '.xls' || ext === '.csv';
+  });
+
+  if (validFiles.length === 0) {
+    alert('Please select valid Excel or CSV files (.xlsx, .xls, .csv).');
+    return;
+  }
+
+  const parsedList = [];
+  const errors = [];
+
+  for (const file of validFiles) {
+    try {
+      const buffer = await readFileAsArrayBuffer(file);
+      const parsed = parseWorkbookData(buffer, file.name);
+
+      parsedList.push({
+        id: 'file_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8),
+        name: file.name,
+        size: file.size,
+        sheetName: parsed.sheetName,
+        workbook: parsed.workbook,
+        rows: parsed.rows,
+        columns: parsed.columns
+      });
+
+      // Background persist to server storage
+      saveFileToStorage(file);
+
+    } catch (err) {
+      console.error(`Error parsing file ${file.name}:`, err);
+      errors.push(`${file.name}: ${err.message}`);
+    }
+  }
+
+  if (errors.length > 0 && parsedList.length === 0) {
+    alert('Errors encountered while reading files:\n' + errors.join('\n'));
+    return;
+  }
+
+  if (append) {
+    // Append or replace files with the same name
+    parsedList.forEach(newFile => {
+      loadedFiles = loadedFiles.filter(existing => existing.name !== newFile.name);
+      loadedFiles.push(newFile);
+    });
+  } else {
+    loadedFiles = parsedList;
+  }
+
+  syncLoadedDatasets();
+}
+
+// Backward-compatible single file handler
+function handleFileUpload(file) {
+  if (file) handleMultipleFiles([file], false);
+}
+
+// Synchronize all loaded files into unified dataset
+function syncLoadedDatasets() {
+  if (!loadedFiles || loadedFiles.length === 0) {
+    clearData(true);
+    return;
+  }
+
+  uploadedRows = [];
+  const colSet = new Set();
+  const multiFiles = loadedFiles.length > 1;
+
+  loadedFiles.forEach(f => {
+    f.rows.forEach(row => {
+      const rowCopy = { ...row };
+      if (multiFiles) {
+        rowCopy['Source File'] = f.name;
+      }
+      uploadedRows.push(rowCopy);
+    });
+
+    f.columns.forEach(col => colSet.add(col));
+  });
+
+  tableColumns = Array.from(colSet);
+  if (multiFiles && !tableColumns.includes('Source File')) {
+    tableColumns.push('Source File');
+  }
+
+  if (loadedFiles.length === 1) {
+    currentFileName = loadedFiles[0].name;
+    currentWorkbook = loadedFiles[0].workbook;
+    setupSheetSwitcher(loadedFiles[0]);
+  } else {
+    currentFileName = `${loadedFiles.length} Merged Spreadsheets`;
+    currentWorkbook = null;
+    hideSheetSwitcher();
+  }
+
+  // Reset filters to ALL so newly added data is immediately visible
+  resetFilterInputs();
+
+  // Detect column semantics
+  detectColumns();
+
+  // Populate Dropdown Filters
+  populateFilters();
+
+  // Render Loaded Files Chips
+  renderFileChips();
+
+  // Update Status Banner
+  updateStatusBar();
+
+  // Render KPIs & Table
+  applyFilters();
+}
+
+// Setup Multi-Sheet Switcher for single multi-sheet workbook
+function setupSheetSwitcher(fileObj) {
+  const sheetSwitcher = document.getElementById('sheetSwitcher');
+  const sheetSelect = document.getElementById('sheetSelect');
+  if (!sheetSwitcher || !sheetSelect) return;
+
+  if (fileObj && fileObj.workbook && fileObj.workbook.SheetNames.length > 1) {
+    sheetSelect.innerHTML = '';
+    fileObj.workbook.SheetNames.forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      if (name === fileObj.sheetName) opt.selected = true;
+      sheetSelect.appendChild(opt);
+    });
+    sheetSwitcher.classList.remove('hidden');
+    sheetSwitcher.classList.add('flex');
+
+    sheetSelect.onchange = function() {
+      loadSpecificSheet(fileObj, sheetSelect.value);
+    };
+  } else {
+    hideSheetSwitcher();
+  }
+}
+
+function hideSheetSwitcher() {
+  const sheetSwitcher = document.getElementById('sheetSwitcher');
+  if (sheetSwitcher) {
+    sheetSwitcher.classList.add('hidden');
+    sheetSwitcher.classList.remove('flex');
+  }
+}
+
+function loadSpecificSheet(fileObj, sheetName) {
+  if (!fileObj || !fileObj.workbook) return;
+  const sheet = fileObj.workbook.Sheets[sheetName];
   if (!sheet) return;
+
   const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1 });
   const headerRowIdx = findBestHeaderRow(aoa);
   const json = XLSX.utils.sheet_to_json(sheet, { range: headerRowIdx, defval: '' });
   const validRows = json.filter(r => {
     return Object.values(r).some(v => String(v !== undefined && v !== null ? v : '').trim().length > 0);
   });
-  loadDataset(validRows, currentFileName);
+
+  fileObj.sheetName = sheetName;
+  fileObj.rows = validRows;
+  fileObj.columns = validRows.length > 0 ? Object.keys(validRows[0]) : [];
+
+  syncLoadedDatasets();
+}
+
+// Render active file chips with row counts and individual delete button
+function renderFileChips() {
+  const container = document.getElementById('loadedFilesContainer');
+  const countBadge = document.getElementById('loadedFileCount');
+  const chipsList = document.getElementById('fileChipsList');
+  const addFilesBtn = document.getElementById('addFilesBtn');
+
+  if (!container || !chipsList) return;
+
+  if (loadedFiles.length === 0) {
+    container.classList.add('hidden');
+    if (addFilesBtn) addFilesBtn.classList.add('hidden');
+    return;
+  }
+
+  container.classList.remove('hidden');
+  if (addFilesBtn) addFilesBtn.classList.remove('hidden');
+  if (countBadge) countBadge.textContent = loadedFiles.length;
+
+  chipsList.innerHTML = '';
+  loadedFiles.forEach(f => {
+    const chip = document.createElement('div');
+    chip.className = 'inline-flex items-center gap-1.5 bg-blue-100/90 text-blue-900 border border-blue-200 px-2.5 py-1 rounded-md text-xs font-semibold shadow-2xs group';
+    chip.innerHTML = `
+      <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-blue-700"></i>
+      <span class="max-w-[200px] truncate" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+      <span class="bg-blue-200/90 text-blue-800 text-[10px] px-1.5 py-0.5 rounded font-bold">${f.rows.length.toLocaleString()} rows</span>
+      <button type="button" class="text-blue-500 hover:text-rose-600 hover:bg-rose-50 p-0.5 rounded cursor-pointer transition" title="Remove ${escapeHtml(f.name)} from analysis" onclick="removeLoadedFile('${f.id}')">
+        <i data-lucide="x" class="w-3.5 h-3.5"></i>
+      </button>
+    `;
+    chipsList.appendChild(chip);
+  });
+
+  if (window.lucide) lucide.createIcons();
+}
+
+// Remove an individual file from loaded files
+function removeLoadedFile(fileId) {
+  loadedFiles = loadedFiles.filter(f => f.id !== fileId);
+  syncLoadedDatasets();
 }
 
 function resetFilterInputs() {
@@ -359,15 +594,19 @@ function updateStatusBar() {
   if (!currentFileName || uploadedRows.length === 0) {
     if (fileBadge) {
       fileBadge.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-800 font-bold border border-amber-200';
-      fileNameText.textContent = 'No file uploaded yet';
+      fileNameText.textContent = 'No files uploaded yet';
     }
-    if (fileStatsText) fileStatsText.textContent = 'Please upload an attendance Excel file above to see your data.';
+    if (fileStatsText) fileStatsText.textContent = 'Please upload attendance Excel files above to see your data.';
     return;
   }
 
   if (fileBadge) {
     fileBadge.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-800 font-bold border border-emerald-300';
-    fileNameText.textContent = `Active File: ${currentFileName}`;
+    if (loadedFiles.length > 1) {
+      fileNameText.textContent = `Active: ${loadedFiles.length} Spreadsheets Merged`;
+    } else {
+      fileNameText.textContent = `Active File: ${currentFileName}`;
+    }
   }
 
   const studentCount = detectedCols.student ? new Set(uploadedRows.map(r => r[detectedCols.student]).filter(Boolean)).size : '—';
@@ -829,10 +1068,11 @@ function resetFilters() {
   applyFilters();
 }
 
-function clearData() {
-  if (uploadedRows.length === 0) return;
-  if (!confirm('Are you sure you want to clear the uploaded data?')) return;
+function clearData(silent = false) {
+  if (uploadedRows.length === 0 && loadedFiles.length === 0) return;
+  if (!silent && !confirm('Are you sure you want to clear all loaded attendance data?')) return;
 
+  loadedFiles = [];
   uploadedRows = [];
   tableColumns = [];
   currentFileName = null;
@@ -840,9 +1080,12 @@ function clearData() {
   detectedCols = { student: null, status: null, batch: null, faculty: null, date: null };
 
   document.getElementById('sheetSwitcher')?.classList.add('hidden');
+  document.getElementById('loadedFilesContainer')?.classList.add('hidden');
+  document.getElementById('addFilesBtn')?.classList.add('hidden');
   if (statusChartInstance) { statusChartInstance.destroy(); statusChartInstance = null; }
   if (batchChartInstance) { batchChartInstance.destroy(); batchChartInstance = null; }
   document.getElementById('chartsSection')?.classList.add('hidden');
+  
   updateStatusBar();
   populateFilters();
   applyFilters();
@@ -866,6 +1109,286 @@ function exportToExcel() {
   XLSX.writeFile(wb, `Export_${currentFileName || 'Attendance'}.xlsx`);
 }
 
+// ----------------------------------------------------
+// Server Storage & Stored Library Handlers
+// ----------------------------------------------------
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+async function updateStorageCountBadge() {
+  try {
+    const res = await fetch('/api/files');
+    if (!res.ok) return;
+    const data = await res.json();
+    const count = data.files ? data.files.length : 0;
+    const badge = document.getElementById('storageBadgeCount');
+    if (badge) badge.textContent = count;
+  } catch (e) {
+    // Silent fail if standalone
+  }
+}
+
+function openStorageModal() {
+  const modal = document.getElementById('storageModal');
+  if (modal) {
+    modal.classList.remove('hidden');
+    loadStorageFilesList();
+  }
+}
+
+function closeStorageModal() {
+  const modal = document.getElementById('storageModal');
+  if (modal) {
+    modal.classList.add('hidden');
+  }
+}
+
+async function loadStorageFilesList() {
+  const loading = document.getElementById('storageLoadingIndicator');
+  const empty = document.getElementById('storageEmptyState');
+  const table = document.getElementById('storageTableContainer');
+
+  if (loading) loading.classList.remove('hidden');
+  if (empty) empty.classList.add('hidden');
+  if (table) table.classList.add('hidden');
+
+  try {
+    const res = await fetch('/api/files');
+    if (!res.ok) throw new Error('Storage service returned ' + res.status);
+    const data = await res.json();
+    storageFilesList = data.files || [];
+    selectedStorageFiles.clear();
+
+    const badge = document.getElementById('storageBadgeCount');
+    if (badge) badge.textContent = storageFilesList.length;
+
+    renderStorageFilesTable(storageFilesList);
+  } catch (err) {
+    console.warn('Failed to load storage files:', err);
+    storageFilesList = [];
+    renderStorageFilesTable([]);
+  } finally {
+    if (loading) loading.classList.add('hidden');
+  }
+}
+
+function renderStorageFilesTable(files) {
+  const empty = document.getElementById('storageEmptyState');
+  const table = document.getElementById('storageTableContainer');
+  const tbody = document.getElementById('storageTableBody');
+  const countLabel = document.getElementById('storageFileCountLabel');
+  const selectAll = document.getElementById('storageSelectAllCheckbox');
+
+  if (countLabel) countLabel.textContent = `${files.length} file${files.length === 1 ? '' : 's'} found`;
+  if (selectAll) selectAll.checked = false;
+
+  if (!files || files.length === 0) {
+    if (empty) empty.classList.remove('hidden');
+    if (table) table.classList.add('hidden');
+    updateStorageSelectionState();
+    return;
+  }
+
+  if (empty) empty.classList.add('hidden');
+  if (table) table.classList.remove('hidden');
+
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  files.forEach((file, idx) => {
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-slate-50 transition border-b border-slate-100';
+
+    const isSelected = selectedStorageFiles.has(file.name);
+    const dateFormatted = file.mtime ? new Date(file.mtime).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '—';
+
+    tr.innerHTML = `
+      <td class="py-2.5 px-3 text-center">
+        <input type="checkbox" value="${escapeHtml(file.name)}" ${isSelected ? 'checked' : ''} onchange="toggleStorageFileSelection('${escapeHtml(file.name)}', this.checked)" class="storage-checkbox rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer">
+      </td>
+      <td class="py-2.5 px-3">
+        <div class="flex items-center gap-2">
+          <i data-lucide="file-spreadsheet" class="w-4 h-4 text-emerald-600 shrink-0"></i>
+          <span class="font-semibold text-slate-800 break-all">${escapeHtml(file.name)}</span>
+        </div>
+      </td>
+      <td class="py-2.5 px-3 text-slate-500 font-medium whitespace-nowrap">${formatBytes(file.size)}</td>
+      <td class="py-2.5 px-3 text-slate-400 whitespace-nowrap">${dateFormatted}</td>
+      <td class="py-2.5 px-4 text-right whitespace-nowrap">
+        <div class="inline-flex items-center gap-1.5">
+          <button type="button" onclick="loadSingleFileFromStorage('${escapeHtml(file.name)}', false)" class="inline-flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold px-2.5 py-1 rounded-md text-[11px] transition cursor-pointer" title="Load this file into the dashboard">
+            <i data-lucide="play" class="w-3 h-3 text-indigo-600"></i> Load
+          </button>
+          <button type="button" onclick="loadSingleFileFromStorage('${escapeHtml(file.name)}', true)" class="inline-flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold px-2.5 py-1 rounded-md text-[11px] transition cursor-pointer" title="Merge this file with active dataset">
+            <i data-lucide="plus" class="w-3 h-3 text-emerald-600"></i> + Add
+          </button>
+          <a href="${file.url}" download="${escapeHtml(file.name)}" class="inline-flex items-center gap-1 bg-slate-100 hover:bg-slate-200 text-slate-700 px-2 py-1 rounded-md text-[11px] transition cursor-pointer" title="Download spreadsheet">
+            <i data-lucide="download" class="w-3 h-3"></i>
+          </a>
+          <button type="button" onclick="deleteFileFromStorage('${escapeHtml(file.name)}')" class="inline-flex items-center gap-1 bg-rose-50 hover:bg-rose-100 text-rose-700 px-2 py-1 rounded-md text-[11px] transition cursor-pointer" title="Delete from storage">
+            <i data-lucide="trash-2" class="w-3 h-3"></i>
+          </button>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  updateStorageSelectionState();
+  if (window.lucide) lucide.createIcons();
+}
+
+function filterStorageList() {
+  const query = (document.getElementById('storageSearchInput')?.value || '').toLowerCase().trim();
+  if (!query) {
+    renderStorageFilesTable(storageFilesList);
+    return;
+  }
+  const filtered = storageFilesList.filter(f => f.name.toLowerCase().includes(query));
+  renderStorageFilesTable(filtered);
+}
+
+function toggleStorageFileSelection(fileName, isChecked) {
+  if (isChecked) {
+    selectedStorageFiles.add(fileName);
+  } else {
+    selectedStorageFiles.delete(fileName);
+  }
+  updateStorageSelectionState();
+}
+
+function toggleSelectAllStorage(master) {
+  const checkboxes = document.querySelectorAll('.storage-checkbox');
+  checkboxes.forEach(cb => {
+    cb.checked = master.checked;
+    if (master.checked) {
+      selectedStorageFiles.add(cb.value);
+    } else {
+      selectedStorageFiles.delete(cb.value);
+    }
+  });
+  updateStorageSelectionState();
+}
+
+function updateStorageSelectionState() {
+  const countText = document.getElementById('storageSelectedCountText');
+  const loadBtn = document.getElementById('loadSelectedStorageBtn');
+  const count = selectedStorageFiles.size;
+
+  if (countText) countText.textContent = `${count} file${count === 1 ? '' : 's'} selected`;
+  if (loadBtn) {
+    loadBtn.disabled = count === 0;
+    loadBtn.innerHTML = `<i data-lucide="layers" class="w-4 h-4"></i> Load Selected (${count}) Merged`;
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
+async function loadSingleFileFromStorage(fileName, append = false) {
+  try {
+    const res = await fetch(`/uploads/${encodeURIComponent(fileName)}`);
+    if (!res.ok) throw new Error('Failed to download ' + fileName);
+    const arrayBuffer = await res.arrayBuffer();
+    const parsed = parseWorkbookData(arrayBuffer, fileName);
+
+    const fileObj = {
+      id: 'file_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8),
+      name: fileName,
+      size: arrayBuffer.byteLength,
+      sheetName: parsed.sheetName,
+      workbook: parsed.workbook,
+      rows: parsed.rows,
+      columns: parsed.columns
+    };
+
+    if (append) {
+      loadedFiles = loadedFiles.filter(f => f.name !== fileName);
+      loadedFiles.push(fileObj);
+    } else {
+      loadedFiles = [fileObj];
+    }
+
+    syncLoadedDatasets();
+    closeStorageModal();
+  } catch (err) {
+    alert('Error loading stored file: ' + err.message);
+  }
+}
+
+async function loadSelectedFilesFromStorage() {
+  if (selectedStorageFiles.size === 0) return;
+
+  const names = Array.from(selectedStorageFiles);
+  const parsedList = [];
+  const errors = [];
+
+  for (const name of names) {
+    try {
+      const res = await fetch(`/uploads/${encodeURIComponent(name)}`);
+      if (!res.ok) throw new Error('Failed to fetch ' + name);
+      const arrayBuffer = await res.arrayBuffer();
+      const parsed = parseWorkbookData(arrayBuffer, name);
+
+      parsedList.push({
+        id: 'file_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8),
+        name: name,
+        size: arrayBuffer.byteLength,
+        sheetName: parsed.sheetName,
+        workbook: parsed.workbook,
+        rows: parsed.rows,
+        columns: parsed.columns
+      });
+    } catch (err) {
+      errors.push(`${name}: ${err.message}`);
+    }
+  }
+
+  if (errors.length > 0 && parsedList.length === 0) {
+    alert('Failed to load selected files:\n' + errors.join('\n'));
+    return;
+  }
+
+  loadedFiles = parsedList;
+  syncLoadedDatasets();
+  closeStorageModal();
+}
+
+async function deleteFileFromStorage(fileName) {
+  if (!confirm(`Are you sure you want to permanently delete "${fileName}" from server storage?`)) return;
+
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(fileName)}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      selectedStorageFiles.delete(fileName);
+      loadStorageFilesList();
+      updateStorageCountBadge();
+    } else {
+      alert('Could not delete file: ' + (data.error || 'Unknown error'));
+    }
+  } catch (err) {
+    alert('Error deleting file: ' + err.message);
+  }
+}
+
+async function handleModalStorageUpload(input) {
+  if (!input || !input.files || input.files.length === 0) return;
+
+  const files = Array.from(input.files);
+  for (const file of files) {
+    await saveFileToStorage(file);
+  }
+
+  input.value = null;
+  loadStorageFilesList();
+  updateStorageCountBadge();
+}
+
 // Resilient App Initialization
 function initApp() {
   const fileInput = document.getElementById('excelFileInput');
@@ -873,7 +1396,7 @@ function initApp() {
   const exportBtn = document.getElementById('exportExcelBtn');
 
   if (fileInput) {
-    fileInput.addEventListener('change', function(e) {
+    fileInput.addEventListener('change', function() {
       handleFileInputChange(fileInput);
     });
   }
@@ -903,9 +1426,8 @@ function initApp() {
       e.preventDefault();
       e.stopPropagation();
       const dt = e.dataTransfer;
-      const file = dt && dt.files && dt.files[0];
-      if (file) {
-        handleFileUpload(file);
+      if (dt && dt.files && dt.files.length > 0) {
+        handleMultipleFiles(Array.from(dt.files), false);
       }
     });
   }
@@ -916,6 +1438,7 @@ function initApp() {
 
   updateStatusBar();
   applyFilters();
+  updateStorageCountBadge();
 }
 
 // Run immediately if DOM is ready, or on DOMContentLoaded
