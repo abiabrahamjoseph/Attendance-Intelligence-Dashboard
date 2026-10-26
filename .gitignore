@@ -23,3 +23,7 @@ yarn-error.log*
 ~$*
 *.tmp
 *.bak
+
+# Uploaded data files (keep folder structure, exclude user spreadsheets)
+uploads/*
+!uploads/.gitkeep
